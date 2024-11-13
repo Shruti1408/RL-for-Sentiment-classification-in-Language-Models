@@ -1,0 +1,111 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+import random
+
+# Load the synthetic dataset
+dataset = pd.read_csv("synthetic_sentiment_data.csv")
+
+# Pre-process the dataset: Remove noisy samples and split into labeled data for training
+dataset = dataset.dropna(subset=["sentiment"])  # Removing noise by dropping rows with no sentiment label
+X = dataset["text"]
+y = dataset["sentiment"]
+
+# Train-test split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+# Vectorize text data
+vectorizer = CountVectorizer(binary=True)
+X_train_vec = vectorizer.fit_transform(X_train)
+X_test_vec = vectorizer.transform(X_test)
+
+# Define Q-learning parameters
+q_table = np.zeros((len(X_train), 2))  # State-action table
+alpha = 0.05  # Learning rate
+gamma = 0.8  # Discount factor for long-term rewards
+epsilon = 1.0  # Start with high exploration rate
+epsilon_decay = 0.995  # Slow decay for prolonged exploration
+epsilon_reset_threshold = 50  # Reset epsilon to encourage late exploration
+
+# Initialize the Sentiment Classifier with a smaller subset of initial training data
+classifier = LogisticRegression()
+initial_data_size = int(0.1 * len(X_train))  # Use only 10% of data to initially train the classifier
+classifier.fit(X_train_vec[:initial_data_size], y_train[:initial_data_size])
+
+# Q-Learning for Instance Selection
+for episode in range(100):  # Run multiple episodes for Q-learning
+    print(f"Starting Episode {episode+1}...")  # Print the current episode number
+
+    selected_instances = []  # List to accumulate instances selected in each episode
+    selected_labels = []     # Corresponding labels for the selected instances
+
+    # Limit the number of instances to be selected in each episode
+    max_selections = int(0.1 * len(X_train))  # Select at most 10% of instances per episode
+    selections = 0
+
+    for i in range(len(X_train)):
+        if selections >= max_selections:
+            break  # Stop selecting if the maximum number of selections for the episode is reached
+
+        state = i  # Each instance is treated as a unique state
+        action = 0  # Default action: Discard
+
+        if random.uniform(0, 1) < epsilon:  # Exploration
+            action = random.choice([0, 1])
+        else:  # Exploitation
+            action = np.argmax(q_table[state])
+
+        # Apply action: 1 = Select the instance, 0 = Discard
+        if action == 1:
+            selected_instances.append(X_train.iloc[i])
+            selected_labels.append(y_train.iloc[i])
+            selections += 1
+            reward = 0  # No immediate reward; rewards are calculated after batch update
+        else:
+            reward = -0.05  # Small penalty for discarding an instance
+
+        # Update Q-value for action
+        old_value = q_table[state, action]
+        next_max = np.max(q_table[state])  # Max Q-value for the next state
+        new_value = (1 - alpha) * old_value + alpha * (reward + gamma * next_max)
+        q_table[state, action] = new_value  # Update Q-table
+
+    # Periodically reset the classifier to prevent overfitting
+    if episode % 20 == 0 and episode > 0:
+        classifier = LogisticRegression()  # Reset classifier to prevent overfitting
+        classifier.fit(X_train_vec[:initial_data_size], y_train[:initial_data_size])  # Retrain on initial subset
+
+    # Update classifier in batch with all selected instances from the episode
+    if selected_instances:
+        temp_X = vectorizer.transform(selected_instances)
+        classifier.fit(temp_X, selected_labels)  # Batch update to stabilize learning
+
+    # Calculate accuracy and reward at the end of the episode
+    y_pred = classifier.predict(X_test_vec)
+    accuracy = accuracy_score(y_test, y_pred)
+
+    # Reward shaping based on incremental accuracy improvement
+    if accuracy >= 0.75:
+        reward = 0.5  # Moderate reward for achieving target accuracy
+    elif accuracy > 0.5:
+        reward = accuracy - 0.5  # Smaller incremental reward for improvements above 50%
+    else:
+        reward = -0.5  # Penalty for accuracy falling below 50%
+
+    # Decay epsilon and reset if necessary
+    if episode % epsilon_reset_threshold == 0 and episode > 0:
+        epsilon = 1.0  # Reset epsilon for late exploration
+    else:
+        epsilon = max(epsilon * epsilon_decay, 0.1)  # Gradual decay with minimum epsilon of 0.1
+
+    # Print accuracy every 5 episodes
+    if (episode + 1) % 5 == 0:
+        print(f"Accuracy after Episode {episode+1}: {accuracy * 100:.2f}%")
+
+# Test the final model on test data
+y_pred_final = classifier.predict(X_test_vec)
+final_accuracy = accuracy_score(y_test, y_pred_final)
+print(f"Final Model Accuracy: {final_accuracy * 100:.2f}%")
