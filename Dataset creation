@@ -1,0 +1,38 @@
+import pandas as pd
+import random
+
+# Set random seed for reproducibility
+random.seed(42)
+
+# Generate synthetic data
+def generate_synthetic_data(num_samples=500):
+    data = []
+    sentiments = ["positive", "negative", "neutral", "noise"]  # Adding 'noise' as a category for noisy data
+    positive_text = ["I love this!", "Fantastic experience", "Highly recommended", "Great service!", "So happy with this"]
+    negative_text = ["Terrible service", "Very disappointing", "Not worth it", "Awful experience", "Hate it"]
+    neutral_text = ["It was okay", "Average experience", "Nothing special", "It was fine", "Just okay"]
+    noise_text = ["asd123", "!!?!", "Lorem ipsum", "Random noise", "xyz@@@"]
+
+    for _ in range(num_samples):
+        sentiment = random.choices(sentiments, weights=[0.4, 0.3, 0.2, 0.1], k=1)[0]  # Assign weights to simulate noise
+        if sentiment == "positive":
+            text = random.choice(positive_text)
+            label = 1  # Positive sentiment
+        elif sentiment == "negative":
+            text = random.choice(negative_text)
+            label = -1  # Negative sentiment
+        elif sentiment == "neutral":
+            text = random.choice(neutral_text)
+            label = 0  # Neutral sentiment
+        else:
+            text = random.choice(noise_text)
+            label = None  # No label for noisy data
+
+        data.append({"text": text, "sentiment": label})
+
+    return pd.DataFrame(data)
+
+# Generate and save the synthetic dataset
+dataset = generate_synthetic_data()
+dataset.to_csv("synthetic_sentiment_data.csv", index=False)
+print("Synthetic dataset created and saved as 'synthetic_sentiment_data.csv'.")
