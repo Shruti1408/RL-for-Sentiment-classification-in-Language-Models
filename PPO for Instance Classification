@@ -1,0 +1,165 @@
+import pandas as pd
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+import random
+
+# Load the synthetic dataset
+dataset = pd.read_csv("synthetic_sentiment_data.csv")
+
+# Pre-process the dataset: Remove noisy samples and split into labeled data for training
+dataset = dataset.dropna(subset=["sentiment"])  # Removing noise by dropping rows with no sentiment label
+X = dataset["text"]
+y = dataset["sentiment"]
+
+# Train-test split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+# Vectorize text data
+vectorizer = CountVectorizer(binary=True)
+X_train_vec = vectorizer.fit_transform(X_train)
+X_test_vec = vectorizer.transform(X_test)
+
+# Hyperparameters
+learning_rate = 0.001
+gamma = 0.99
+epsilon_clip = 0.2
+batch_size = 32
+epochs = 100
+ppo_epochs = 4  # Number of PPO updates per episode
+
+# Define Policy Network
+class PolicyNetwork(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(PolicyNetwork, self).__init__()
+        self.fc1 = nn.Linear(input_dim, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.action_head = nn.Linear(64, output_dim)
+        self.value_head = nn.Linear(64, 1)  # Value function head
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        action_probs = torch.softmax(self.action_head(x), dim=-1)
+        state_value = self.value_head(x)
+        return action_probs, state_value
+
+# Initialize the Policy Network
+input_dim = X_train_vec.shape[1]
+output_dim = 2  # Select or discard
+policy_net = PolicyNetwork(input_dim, output_dim)
+optimizer = optim.Adam(policy_net.parameters(), lr=learning_rate)
+
+# Helper function for calculating advantage
+def compute_advantage(rewards, values, gamma):
+    advantage = []
+    returns = 0
+    for r, v in zip(reversed(rewards), reversed(values)):
+        returns = r + gamma * returns
+        advantage.insert(0, returns - v.item())
+    return torch.tensor(advantage, dtype=torch.float32)
+
+# Initialize the Sentiment Classifier
+classifier = LogisticRegression()
+initial_data_size = int(0.1 * len(X_train))  # Use only 10% of data to initially train the classifier
+classifier.fit(X_train_vec[:initial_data_size], y_train[:initial_data_size])
+
+# Training Loop for PPO
+for episode in range(epochs):
+    print(f"Starting Episode {episode+1}...")
+
+    log_probs = []
+    values = []
+    rewards = []
+    actions = []
+    states = []
+
+    selected_instances = []
+    selected_labels = []
+
+    max_selections = int(0.1 * len(X_train))  # Limit the number of selections per episode
+    selections = 0
+
+    for i in range(len(X_train)):
+        if selections >= max_selections:
+            break  # Stop selecting if maximum selections reached
+
+        state = torch.tensor(X_train_vec[i].toarray(), dtype=torch.float32)
+        action_probs, state_value = policy_net(state)
+
+        # Sample action based on action probabilities
+        # Avoid in-place operation by using .clone()
+        action_dist = torch.distributions.Categorical(probs=action_probs.clone().detach())
+        action = action_dist.sample()
+
+        actions.append(action)
+        values.append(state_value)
+        log_probs.append(action_dist.log_prob(action))
+        states.append(state)
+
+        # Apply action
+        if action.item() == 1:  # Select instance
+            selected_instances.append(X_train.iloc[i])
+            selected_labels.append(y_train.iloc[i])
+            selections += 1
+            reward = 0
+        else:
+            reward = -0.05
+
+        rewards.append(reward)
+
+    # Update Sentiment Classifier in batch with all selected instances
+    if selected_instances:
+        temp_X = vectorizer.transform(selected_instances)
+        classifier.fit(temp_X, selected_labels)
+
+    # Calculate reward based on classifier accuracy
+    y_pred = classifier.predict(X_test_vec)
+    accuracy = accuracy_score(y_test, y_pred)
+
+    # Reward shaping
+    final_reward = 1 if accuracy >= 0.75 else -1
+    rewards[-1] += final_reward  # Adjust last reward based on final accuracy
+
+    # Calculate advantages
+    advantages = compute_advantage(rewards, values, gamma)
+
+    # PPO update
+    for _ in range(ppo_epochs):
+        for i in range(len(states)):
+            # Compute new log probs and values
+            action_probs, state_value = policy_net(states[i])
+            new_action_dist = torch.distributions.Categorical(action_probs)
+            new_log_prob = new_action_dist.log_prob(actions[i])
+
+            # Compute ratio for PPO clipping
+            ratio = torch.exp(new_log_prob - log_probs[i])
+            clipped_ratio = torch.clamp(ratio, 1 - epsilon_clip, 1 + epsilon_clip)
+            surrogate1 = ratio * advantages[i]
+            surrogate2 = clipped_ratio * advantages[i]
+            policy_loss = -torch.min(surrogate1, surrogate2).mean()
+
+            # Convert reward to tensor before unsqueeze
+            value_loss = nn.functional.mse_loss(state_value, torch.tensor([rewards[i]], dtype=torch.float32))
+
+            # Combine losses
+            loss = policy_loss + 0.5 * value_loss
+
+            # Backpropagation
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+    # Print accuracy every 5 episodes
+    if (episode + 1) % 5 == 0:
+        print(f"Accuracy after Episode {episode+1}: {accuracy * 100:.2f}%")
+
+# Test the final model
+y_pred_final = classifier.predict(X_test_vec)
+final_accuracy = accuracy_score(y_test, y_pred_final)
+print(f"Final Model Accuracy: {final_accuracy * 100:.2f}%")
